@@ -57,11 +57,21 @@ def main(args):
     # 用来保存coco_info的文件
     results_file = "results{}.txt".format(datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
 
+    # data_transform = {
+        # "train": transforms.Compose([transforms.ToTensor(),
+                                     # transforms.RandomHorizontalFlip(0.5)]),
+        # "val": transforms.Compose([transforms.ToTensor()])
+    # }
+    img_size=448
     data_transform = {
-        "train": transforms.Compose([transforms.ToTensor(),
-                                     transforms.RandomHorizontalFlip(0.5)]),
-        "val": transforms.Compose([transforms.ToTensor()])
-    }
+        "train": transforms.Compose([transforms.RandomResizedCrop(img_size),
+                                     transforms.RandomHorizontalFlip(),
+                                     transforms.ToTensor(),
+                                     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])]),
+        "val": transforms.Compose([transforms.Resize(int(img_size * 1.143)),
+                                   transforms.CenterCrop(img_size),
+                                   transforms.ToTensor(),
+                                   transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])}
 
     COCO_root = args.data_path
 
