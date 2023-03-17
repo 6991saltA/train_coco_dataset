@@ -4,8 +4,8 @@ import datetime
 import torch
 import torchvision
 
-from torchvision import transforms as tf
-import transforms
+from torchvision import transforms
+# import transforms
 from network_files import FasterRCNN, AnchorsGenerator
 from backbone import MobileNetV2, vgg, resnet50, resnet50_fpn_backbone
 from my_dataset import CocoDetection
@@ -58,14 +58,23 @@ def main(args):
     # 用来保存coco_info的文件
     results_file = "results{}.txt".format(datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
 
+    # data_transform = {
+        # "train": transforms.Compose([transforms.ToTensor(),
+                                     # tf.Resize(800),
+                                     # transforms.RandomHorizontalFlip(0.5)]),
+        # "val": transforms.Compose([transforms.ToTensor(),
+                                  # tf.Resize(800)])
+    # }
+    img_size = 800
     data_transform = {
-        "train": transforms.Compose([transforms.ToTensor(),
-                                     tf.Resize(800),
-                                     transforms.RandomHorizontalFlip(0.5)]),
-        "val": transforms.Compose([transforms.ToTensor(),
-                                  tf.Resize(800)])
-    }
-
+        "train": transforms.Compose([transforms.RandomResizedCrop(img_size),
+                                     transforms.RandomHorizontalFlip(),
+                                     transforms.ToTensor(),
+                                     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])]),
+        "val": transforms.Compose([transforms.Resize(int(img_size * 1.143)),
+                                   transforms.CenterCrop(img_size),
+                                   transforms.ToTensor(),
+                                   transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])}
     COCO_root = args.data_path
 
     # load train data set
