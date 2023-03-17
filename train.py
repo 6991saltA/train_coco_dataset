@@ -4,8 +4,8 @@ import datetime
 import torch
 import torchvision
 
-# import transforms
-from torchvision import transforms
+import transforms
+# from torchvision import transforms
 from network_files import FasterRCNN, AnchorsGenerator
 from backbone import MobileNetV2, vgg, resnet50, resnet50_fpn_backbone
 from my_dataset import CocoDetection
@@ -60,10 +60,8 @@ def main(args):
 
     data_transform = {
         "train": transforms.Compose([transforms.ToTensor(),
-                                     transforms.Resize(800),
                                      transforms.RandomHorizontalFlip(0.5)]),
-        "val": transforms.Compose([transforms.ToTensor(),
-                                   transforms.Resize(800)])
+        "val": transforms.Compose([transforms.ToTensor()])
     }
     
     COCO_root = args.data_path
