@@ -62,7 +62,8 @@ def main(args):
         "train": transforms.Compose([transforms.ToTensor(),
                                      tf.Resize(800),
                                      transforms.RandomHorizontalFlip(0.5)]),
-        "val": transforms.Compose([transforms.ToTensor()])
+        "val": transforms.Compose([transforms.ToTensor(),
+                                  tf.Resize(800)])
     }
 
     COCO_root = args.data_path
