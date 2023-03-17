@@ -4,6 +4,7 @@ import datetime
 import torch
 import torchvision
 
+from torchvision import transforms as tf
 import transforms
 from network_files import FasterRCNN, AnchorsGenerator
 from backbone import MobileNetV2, vgg, resnet50, resnet50_fpn_backbone
@@ -59,6 +60,7 @@ def main(args):
 
     data_transform = {
         "train": transforms.Compose([transforms.ToTensor(),
+                                     tf.Resize(800),
                                      transforms.RandomHorizontalFlip(0.5)]),
         "val": transforms.Compose([transforms.ToTensor()])
     }
