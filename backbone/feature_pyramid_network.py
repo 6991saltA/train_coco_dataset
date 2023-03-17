@@ -61,74 +61,47 @@ class IntermediateLayerGetter(nn.ModuleDict):
         return out
 
 
-class BackboneWithFPN(nn.Module):
-    """
-    Adds a FPN on top of a model.
-    Internally, it uses torchvision.models._utils.IntermediateLayerGetter to
-    extract a submodel that returns the feature maps specified in return_layers.
-    The same limitations of IntermediatLayerGetter apply here.
-    Arguments:
-        backbone (nn.Module)
-        return_layers (Dict[name, new_name]): a dict containing the names
-            of the modules for which the activations will be returned as
-            the key of the dict, and the value of the dict is the name
-            of the returned activation (which the user can specify).
-        in_channels_list (List[int]): number of channels for each feature map
-            that is returned, in the order they are present in the OrderedDict
-        out_channels (int): number of channels in the FPN.
-        extra_blocks: ExtraFPNBlock
-    Attributes:
-        out_channels (int): the number of channels in the FPN
-    """
+class CARAFE(nn.Module):
 
-    def __init__(self,
-                 backbone1: nn.Module,
-                 backbone2: nn.Module,
-                 return_layers=None,
-                 in_channels_list=None,
-                 out_channels=256,
-                 extra_blocks=None,
-                 re_getter=True):
-        super().__init__()
+    def __init__(self, inC, outC, kernel_size=3, up_factor=2):
+        super(CARAFE, self).__init__()
+        self.kernel_size = kernel_size
+        self.up_factor = up_factor
+        self.down = nn.Conv2d(inC, inC // 4, 1)
+        self.encoder = nn.Conv2d(inC // 4, self.up_factor ** 2 * self.kernel_size ** 2,
+                                 self.kernel_size, 1, self.kernel_size // 2)
+        self.out = nn.Conv2d(inC, outC, 1)
 
-        if extra_blocks is None:
-            extra_blocks = LastLevelMaxPool()
+    def forward(self, in_tensor):
+        N, C, H, W = in_tensor.size()
 
-        if re_getter:
-            assert return_layers is not None
-            self.body1 = IntermediateLayerGetter(backbone1, return_layers=return_layers)
-            self.body2 = backbone2
-        else:
-            self.body1 = backbone1
-            self.body2 = backbone2
+        # N,C,H,W -> N,C,delta*H,delta*W
+        # kernel prediction module
+        kernel_tensor = self.down(in_tensor)  # (N, Cm, H, W)
+        kernel_tensor = self.encoder(kernel_tensor)  # (N, S^2 * Kup^2, H, W)
+        kernel_tensor = F.pixel_shuffle(kernel_tensor, self.up_factor)  # (N, S^2 * Kup^2, H, W)->(N, Kup^2, S*H, S*W)
+        kernel_tensor = F.softmax(kernel_tensor, dim=1)  # (N, Kup^2, S*H, S*W)
+        kernel_tensor = kernel_tensor.unfold(2, self.up_factor, step=self.up_factor) # (N, Kup^2, H, W*S, S)
+        kernel_tensor = kernel_tensor.unfold(3, self.up_factor, step=self.up_factor) # (N, Kup^2, H, W, S, S)
+        kernel_tensor = kernel_tensor.reshape(N, self.kernel_size ** 2, H, W, self.up_factor ** 2) # (N, Kup^2, H, W, S^2)
+        kernel_tensor = kernel_tensor.permute(0, 2, 3, 1, 4)  # (N, H, W, Kup^2, S^2)
 
-        self.fpn = FeaturePyramidNetwork(
-            in_channels_list=in_channels_list,
-            out_channels=out_channels,
-            extra_blocks=extra_blocks,
-        )
+        # content-aware reassembly module
+        # tensor.unfold: dim, size, step
+        in_tensor = F.pad(in_tensor, pad=(self.kernel_size // 2, self.kernel_size // 2,
+                                          self.kernel_size // 2, self.kernel_size // 2),
+                          mode='constant', value=0) # (N, C, H+Kup//2+Kup//2, W+Kup//2+Kup//2)
+        in_tensor = in_tensor.unfold(2, self.kernel_size, step=1) # (N, C, H, W+Kup//2+Kup//2, Kup)
+        in_tensor = in_tensor.unfold(3, self.kernel_size, step=1) # (N, C, H, W, Kup, Kup)
+        in_tensor = in_tensor.reshape(N, C, H, W, -1) # (N, C, H, W, Kup^2)
+        in_tensor = in_tensor.permute(0, 2, 3, 1, 4)  # (N, H, W, C, Kup^2)
 
-        self.out_channels = out_channels
-
-    def forward(self, x):
-
-        backbone_out = OrderedDict()
-        x_resnet = self.body1(x)
-        x_st = self.body2(x)
-
-        index = 0
-        for key, value in x_st.items():
-            x_st[key] = self.conv_list[index](value)
-            index = index + 1
-
-        index = 0
-        for key, value in x_resnet.items():
-            backbone_out[key] = self.relu(self.bn_list[index](value + x_st[key]))
-            # x_resnet[key] = self.relu(self.bn_list[index](value + x_st[key]))
-            index = index + 1
-
-        out = self.fpn(backbone_out)
-        return out
+        out_tensor = torch.matmul(in_tensor, kernel_tensor)  # (N, H, W, C, S^2)
+        out_tensor = out_tensor.reshape(N, H, W, -1)
+        out_tensor = out_tensor.permute(0, 3, 1, 2)
+        out_tensor = F.pixel_shuffle(out_tensor, self.up_factor)
+        out_tensor = self.out(out_tensor)
+        return out_tensor
 
 
 class FeaturePyramidNetwork(nn.Module):
@@ -151,6 +124,8 @@ class FeaturePyramidNetwork(nn.Module):
 
     def __init__(self, in_channels_list, out_channels, extra_blocks=None):
         super().__init__()
+
+        self.carafe = CARAFE(out_channels, out_channels)
         # 用来调整resnet特征矩阵(layer1,2,3,4)的channel（kernel_size=1）
         self.inner_blocks = nn.ModuleList()
         # 对调整后的特征矩阵使用3x3的卷积核来得到对应的预测特征矩阵
@@ -228,7 +203,8 @@ class FeaturePyramidNetwork(nn.Module):
         for idx in range(len(x) - 2, -1, -1):
             inner_lateral = self.get_result_from_inner_blocks(x[idx], idx)
             feat_shape = inner_lateral.shape[-2:]
-            inner_top_down = F.interpolate(last_inner, size=feat_shape, mode="nearest")
+            inner_top_down = self.carafe(last_inner)
+            # inner_top_down = F.interpolate(last_inner, size=feat_shape, mode="nearest")
             last_inner = inner_lateral + inner_top_down
             results.insert(0, self.get_result_from_layer_blocks(last_inner, idx))
 
@@ -249,5 +225,112 @@ class LastLevelMaxPool(torch.nn.Module):
 
     def forward(self, x: List[Tensor], y: List[Tensor], names: List[str]) -> Tuple[List[Tensor], List[str]]:
         names.append("pool")
-        x.append(F.max_pool2d(x[-1], 1, 2, 0))
+        x.append(F.max_pool2d(x[-1], 1, 2, 0))  # input, kernel_size, stride, padding
         return x, names
+
+
+class BackboneWithFPN(nn.Module):
+    """
+    Adds a FPN on top of a model.
+    Internally, it uses torchvision.models._utils.IntermediateLayerGetter to
+    extract a submodel that returns the feature maps specified in return_layers.
+    The same limitations of IntermediatLayerGetter apply here.
+    Arguments:
+        backbone (nn.Module)
+        return_layers (Dict[name, new_name]): a dict containing the names
+            of the modules for which the activations will be returned as
+            the key of the dict, and the value of the dict is the name
+            of the returned activation (which the user can specify).
+        in_channels_list (List[int]): number of channels for each feature map
+            that is returned, in the order they are present in the OrderedDict
+        out_channels (int): number of channels in the FPN.
+        extra_blocks: ExtraFPNBlock
+    Attributes:
+        out_channels (int): the number of channels in the FPN
+    """
+
+    def __init__(self,
+                 backbone1: nn.Module,
+                 backbone2: nn.Module,
+                 return_layers=None,
+                 in_channels_list=None,
+                 out_channels=256,
+                 extra_blocks=None,
+                 re_getter=True,
+                 st_in_channels=(96, 192, 384, 768),
+                 st_out_channels=(256, 512, 1024, 2048),
+                 keys=('0', '1', '2', '3')):
+        super().__init__()
+
+        self.keys = keys
+        norm_layer = nn.BatchNorm2d
+        self._norm_layer = norm_layer
+
+        self.relu = nn.ReLU(inplace=True)
+        self.bn_list = nn.ModuleList()
+
+        for layer_index in range(len(st_out_channels)):
+            self.bn_list.append(nn.BatchNorm2d(st_out_channels[layer_index]))
+
+        self.conv_list = nn.ModuleList()
+        self.st_in_channels = st_in_channels
+        self.st_out_channels = st_out_channels
+
+        for layer_index in range(len(st_out_channels)):
+            self.conv_list.append(nn.Conv2d(self.st_in_channels[layer_index], self.st_out_channels[layer_index], kernel_size=(1, 1), stride=1))
+
+        if extra_blocks is None:
+            extra_blocks = LastLevelMaxPool()
+
+        if re_getter is True:
+            assert return_layers is not None
+            self.body1 = IntermediateLayerGetter(backbone1, return_layers=return_layers)
+            self.body2 = backbone2
+        else:
+            self.body1 = backbone1
+            self.body2 = backbone2
+
+        self.fpn = FeaturePyramidNetwork(
+            in_channels_list=in_channels_list,
+            out_channels=out_channels,
+            extra_blocks=extra_blocks,
+        )
+
+        self.out_channels = out_channels
+
+    def forward(self, x):
+
+        # -----------------------------------------------------------------------------------
+        # 实验七
+        backbone_out = OrderedDict()
+        x_resnet = self.body1(x)
+        x_st = self.body2(x)
+
+        # for index in range(len(self.conv_list)):
+        #     temp1 = self.conv_list[index](x_st[self.keys[index]])
+        #     temp2 = x_resnet[self.keys[index]]
+        #     backbone_out[self.keys[index]] = temp1 + temp2
+
+        # -----------------------------------------------------------------------------------
+        index = 0
+        for key, value in x_st.items():
+            x_st[key] = self.conv_list[index](value)
+            index = index + 1
+
+        index = 0
+        for key, value in x_resnet.items():
+            backbone_out[key] = self.relu(self.bn_list[index](value + x_st[key]))
+            # x_resnet[key] = self.relu(self.bn_list[index](value + x_st[key]))
+            index = index + 1
+        # -----------------------------------------------------------------------------------
+
+        # backbone_out = OrderedDict()
+        # x_st = self.body2(x)
+
+        # for index in range(len(self.conv_list)):
+        #     backbone_out[self.keys[index]] = self.conv_list[index](x_st[self.keys[index]])
+
+        # x_st = self.body2(x)
+        out = self.fpn(backbone_out)
+
+        return out
